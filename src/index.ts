@@ -157,7 +157,19 @@ export const OpenCodeMemPlugin: Plugin = async (ctx: PluginInput) => {
         const userMessage = textParts.map((p) => p.text).join("\n");
         if (!userMessage.trim()) return;
 
-        userPromptManager.savePrompt(input.sessionID, output.message.id, directory, userMessage);
+        log("chat.message captured", {
+          sessionID: input.sessionID,
+          inputMessageID: input.messageID,
+          outputMessageID: output.message.id,
+          preview: userMessage.slice(0, 80),
+        });
+
+        userPromptManager.savePrompt(
+          input.sessionID,
+          input.messageID ?? output.message.id,
+          directory,
+          userMessage
+        );
 
         const messagesResponse = await ctx.client.session.messages({
           path: { id: input.sessionID },
@@ -484,10 +496,13 @@ export const OpenCodeMemPlugin: Plugin = async (ctx: PluginInput) => {
         const sessionID = event.properties?.sessionID;
         if (!sessionID) return;
 
+        log("session.idle received", { sessionID });
+
         if (idleTimeout) clearTimeout(idleTimeout);
 
         idleTimeout = setTimeout(async () => {
           try {
+            log("session.idle handler running", { sessionID });
             await performAutoCapture(ctx, sessionID, directory);
 
             if (webServer?.isServerOwner()) {

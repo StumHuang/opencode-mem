@@ -24,10 +24,19 @@ export async function performAutoCapture(
   try {
     const prompt = userPromptManager.getLastUncapturedPrompt(sessionID);
     if (!prompt) {
+      log("Auto-capture skipped: no uncaptured prompt", { sessionID });
       return;
     }
 
+    log("Auto-capture start", {
+      sessionID,
+      promptId: prompt.id,
+      messageId: prompt.messageId,
+      preview: prompt.content.slice(0, 80),
+    });
+
     if (!userPromptManager.claimPrompt(prompt.id)) {
+      log("Auto-capture skipped: prompt already claimed", { promptId: prompt.id });
       return;
     }
 
@@ -40,25 +49,49 @@ export async function performAutoCapture(
     });
 
     if (!response.data) {
+      log("Auto-capture skipped: session.messages returned no data", { sessionID });
       return;
     }
 
     const messages = response.data;
+    log("Auto-capture loaded session messages", {
+      sessionID,
+      messageCount: Array.isArray(messages) ? messages.length : -1,
+    });
 
     const promptIndex = messages.findIndex((m: any) => m.info?.id === prompt.messageId);
     if (promptIndex === -1) {
+      log("Auto-capture skipped: prompt message not found", {
+        promptId: prompt.id,
+        messageId: prompt.messageId,
+        availableMessageIds: Array.isArray(messages)
+          ? messages
+              .map((m: any) => m?.info?.id)
+              .filter(Boolean)
+              .slice(-10)
+          : [],
+      });
       return;
     }
 
     const aiMessages = messages.slice(promptIndex + 1);
 
     if (aiMessages.length === 0) {
+      log("Auto-capture skipped: no messages after prompt", {
+        promptId: prompt.id,
+        messageId: prompt.messageId,
+        promptIndex,
+      });
       return;
     }
 
     const { textResponses, toolCalls } = extractAIContent(aiMessages);
 
     if (textResponses.length === 0 && toolCalls.length === 0) {
+      log("Auto-capture skipped: no assistant content after prompt", {
+        promptId: prompt.id,
+        aiMessageCount: aiMessages.length,
+      });
       return;
     }
 
@@ -70,6 +103,10 @@ export async function performAutoCapture(
     const summaryResult = await generateSummary(context, sessionID, prompt.content);
 
     if (!summaryResult || summaryResult.type === "skip") {
+      log("Auto-capture skipped by model", {
+        promptId: prompt.id,
+        result: summaryResult,
+      });
       userPromptManager.deletePrompt(prompt.id);
       return;
     }
@@ -90,6 +127,12 @@ export async function performAutoCapture(
     });
 
     if (result.success) {
+      log("Memory captured", {
+        promptId: prompt.id,
+        memoryId: result.id,
+        type: summaryResult.type,
+        tags: summaryResult.tags,
+      });
       userPromptManager.linkMemoryToPrompt(prompt.id, result.id);
       userPromptManager.markAsCaptured(prompt.id);
 
@@ -264,12 +307,7 @@ RULES:
 5. Generate 2-4 technical tags (e.g., "react", "auth", "bug-fix")
 6. You MUST write the summary in ${langName}.
 
-FORMAT:
-## Request
-[1-2 sentences: what was requested, in ${langName}]
-
-## Outcome
-[1-2 sentences: what was done, include files/functions, in ${langName}]
+The "summary" field MUST be a single plain string (not an object, not nested). Write it as 2-4 sentences describing what was requested and what was done, in ${langName}.
 
 SKIP if: greetings, casual chat, no code/decisions made
 CAPTURE if: code changed, bug fixed, feature added, decision made`;
@@ -333,12 +371,7 @@ RULES:
 5. Generate 2-4 technical tags (e.g., "react", "auth", "bug-fix")
 6. You MUST write the summary in ${langName}.
 
-FORMAT:
-## Request
-[1-2 sentences: what was requested, in ${langName}]
-
-## Outcome
-[1-2 sentences: what was done, include files/functions, in ${langName}]
+The "summary" field MUST be a single plain string (not an object, not nested). Write it as 2-4 sentences describing what was requested and what was done, in ${langName}.
 
 SKIP if: greetings, casual chat, no code/decisions made
 CAPTURE if: code changed, bug fixed, feature added, decision made`;

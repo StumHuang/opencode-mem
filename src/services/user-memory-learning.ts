@@ -163,7 +163,12 @@ Your task is to analyze user prompts and ${existingProfile ? "update" : "create"
 
 CRITICAL: Detect the language used by the user in their prompts. You MUST output all descriptions, categories, and text in the SAME language as the user's prompts.
 
-Use the update_user_profile tool to save the ${existingProfile ? "updated" : "new"} profile.`;
+You MUST respond with a single valid JSON object with these fields:
+- "preferences": array of objects (each with "category", "description", "confidence", "evidence" array)
+- "patterns": array of objects (each with "category", "description")
+- "workflows": array of objects (each with "description", "steps" array)
+
+If there is insufficient data, return empty arrays for each field. Never omit these fields.`;
 
     const { z } = await import("zod");
     const schema = z.object({

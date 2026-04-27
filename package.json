@@ -1,6 +1,6 @@
 {
-  "name": "opencode-mem",
-  "version": "2.13.0",
+  "name": "@stumhuang/opencode-mem",
+  "version": "2.14.2",
   "description": "OpenCode plugin that gives coding agents persistent memory using local vector database",
   "type": "module",
   "main": "dist/plugin.js",
@@ -21,7 +21,7 @@
     "typecheck": "tsc --noEmit",
     "format": "prettier --write \"src/**/*.{ts,js,css,html}\"",
     "format:check": "prettier --check \"src/**/*.{ts,js,css,html}\"",
-    "prepare": "husky"
+    "prepare": "command -v husky >/dev/null 2>&1 && husky || true"
   },
   "keywords": [
     "opencode",
@@ -37,7 +37,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/tickernelz/opencode-mem.git"
+    "url": "git+https://github.com/StumHuang/opencode-mem.git"
   },
   "publishConfig": {
     "access": "public"

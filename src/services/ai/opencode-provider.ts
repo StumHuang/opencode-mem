@@ -4,6 +4,7 @@ import { generateText, Output } from "ai";
 import { createAnthropic } from "@ai-sdk/anthropic";
 import { createOpenAI } from "@ai-sdk/openai";
 import type { ZodType } from "zod";
+import { log } from "../logger.js";
 
 type OAuthAuth = { type: "oauth"; refresh: string; access: string; expires: number };
 type ApiAuth = { type: "api"; key: string };
@@ -228,6 +229,52 @@ export function createOAuthFetch(
   };
 }
 
+// --- GitHub Copilot Fetch ---
+// Protocol verified from anomalyco/opencode source
+// (packages/opencode/src/plugin/github-copilot/copilot.ts):
+//   - The OAuth `refresh` field IS the GitHub OAuth token (gho_*); used directly.
+//   - Bearer it against https://api.githubcopilot.com (OpenAI-compatible).
+//   - Required headers: Authorization, User-Agent, Openai-Intent, x-initiator.
+const COPILOT_BASE_URL = "https://api.githubcopilot.com";
+const COPILOT_USER_AGENT = "opencode-mem-plugin";
+
+function createCopilotFetch(
+  statePath: string
+): (input: string | Request | URL, init?: RequestInit) => Promise<Response> {
+  return async (input: string | Request | URL, init?: RequestInit): Promise<Response> => {
+    const auth = readOpencodeAuth(statePath, "github-copilot") as OAuthAuth;
+
+    const requestInit = init ?? {};
+    const headers = new Headers();
+    if (input instanceof Request) {
+      input.headers.forEach((v, k) => headers.set(k, v));
+    }
+    if (requestInit.headers) {
+      if (requestInit.headers instanceof Headers) {
+        requestInit.headers.forEach((v, k) => headers.set(k, v));
+      } else if (Array.isArray(requestInit.headers)) {
+        for (const [k, v] of requestInit.headers as [string, string][]) {
+          if (typeof v !== "undefined") headers.set(k, v);
+        }
+      } else {
+        for (const [k, v] of Object.entries(requestInit.headers as Record<string, string>)) {
+          if (typeof v !== "undefined") headers.set(k, String(v));
+        }
+      }
+    }
+
+    headers.set("Authorization", `Bearer ${auth.refresh}`);
+    headers.set("User-Agent", COPILOT_USER_AGENT);
+    headers.set("Openai-Intent", "conversation-edits");
+    headers.set("x-initiator", "agent");
+    // ai-sdk-openai may inject these; copilot endpoint rejects them
+    headers.delete("x-api-key");
+    headers.delete("openai-organization");
+
+    return fetch(input, { ...requestInit, headers });
+  };
+}
+
 // --- Provider ---
 export function createOpencodeAIProvider(providerName: string, auth: Auth, statePath?: string) {
   if (providerName === "anthropic") {
@@ -246,8 +293,19 @@ export function createOpencodeAIProvider(providerName: string, auth: Auth, state
     }
     return createOpenAI({ apiKey: auth.key });
   }
+  if (providerName === "github-copilot") {
+    if (auth.type !== "oauth") {
+      throw new Error("github-copilot requires OAuth authentication via opencode auth login.");
+    }
+    if (!statePath) throw new Error("statePath is required for github-copilot");
+    return createOpenAI({
+      apiKey: "",
+      baseURL: COPILOT_BASE_URL,
+      fetch: createCopilotFetch(statePath) as unknown as typeof globalThis.fetch,
+    });
+  }
   throw new Error(
-    `Unsupported opencode provider: '${providerName}'. Supported providers: anthropic, openai`
+    `Unsupported opencode provider: '${providerName}'. Supported providers: anthropic, openai, github-copilot`
   );
 }
 
@@ -263,6 +321,69 @@ export async function generateStructuredOutput<T>(options: {
 }): Promise<T> {
   const auth = readOpencodeAuth(options.statePath, options.providerName);
   const provider = createOpencodeAIProvider(options.providerName, auth, options.statePath);
+
+  // github-copilot: use plain chat completions + manual JSON parsing.
+  // Output.object / Responses API are not supported by the Copilot endpoint.
+  // Also strip any "use the X tool" instructions since we don't pass tools.
+  if (options.providerName === "github-copilot") {
+    const model = (provider as ReturnType<typeof createOpenAI>).chat(options.modelId);
+    // Remove tool-call instructions from system prompt; replace with direct JSON instruction.
+    const cleanedSystem = options.systemPrompt
+      .replace(/Use the \S+ tool to [^\n.]+[.\n]?/gi, "")
+      .trim();
+    const result = await generateText({
+      model,
+      system:
+        cleanedSystem +
+        "\n\nYou MUST respond with a single valid JSON object only. No markdown fences, no explanation, no tool calls.",
+      prompt: options.userPrompt,
+      temperature: options.temperature ?? 0.3,
+    });
+    const text = result.text.trim();
+    log("Copilot raw text response", {
+      modelId: options.modelId,
+      preview: text.slice(0, 400),
+    });
+    // Strip markdown code fences if present
+    const json = text
+      .replace(/^```(?:json)?\s*/i, "")
+      .replace(/\s*```\s*$/, "")
+      .trim();
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(json);
+    } catch (e) {
+      throw new Error(`Failed to parse JSON from copilot response: ${text.slice(0, 200)}`);
+    }
+    // Coerce missing array fields to [] so zod doesn't reject a mostly-valid response
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      const shape = (options.schema as any)._def?.shape;
+      const shapeObj = typeof shape === "function" ? shape() : shape;
+      if (shapeObj) {
+        for (const [key, fieldDef] of Object.entries(shapeObj)) {
+          const defType = (fieldDef as any)?._def?.type ?? (fieldDef as any)?._def?.typeName;
+          if (defType === "array" || defType === "ZodArray") {
+            if ((parsed as any)[key] === undefined) {
+              (parsed as any)[key] = [];
+            }
+          }
+        }
+      }
+    }
+    log("Copilot parsed JSON response", {
+      modelId: options.modelId,
+      parsed,
+    });
+    const parseResult = options.schema.safeParse(parsed);
+    if (!parseResult.success) {
+      throw new Error(
+        `Copilot JSON schema mismatch. Raw: ${JSON.stringify(parsed).slice(0, 400)}\nErrors: ${JSON.stringify(parseResult.error.issues)}`
+      );
+    }
+    return parseResult.data as T;
+  }
+
+  // anthropic / openai: use ai-sdk Output.object for structured output
   const result = await generateText({
     model: provider(options.modelId),
     system: options.systemPrompt,
