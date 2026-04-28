@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
-import { generateText, Output } from "ai";
+import { generateText, Output, tool } from "ai";
 import { createAnthropic } from "@ai-sdk/anthropic";
 import { createOpenAI } from "@ai-sdk/openai";
 import type { ZodType } from "zod";
@@ -35,10 +35,14 @@ export function isProviderConnected(providerName: string): boolean {
 
 // --- Auth ---
 function findAuthJsonPath(statePath: string): string | undefined {
+  const localDir = dirname(statePath);
+  const baseDir = dirname(localDir);
   const candidates = [
     join(statePath, "auth.json"),
-    join(dirname(statePath), "share", "opencode", "auth.json"),
+    join(localDir, "share", "opencode", "auth.json"),
+    join(baseDir, "share", "opencode", "auth.json"),
     join(statePath.replace("/state/", "/share/"), "auth.json"),
+    join(statePath.replace("\\state\\", "\\share\\"), "auth.json"),
   ];
   return candidates.find(existsSync);
 }
@@ -271,7 +275,31 @@ function createCopilotFetch(
     headers.delete("x-api-key");
     headers.delete("openai-organization");
 
-    return fetch(input, { ...requestInit, headers });
+    const response = await fetch(input, { ...requestInit, headers });
+
+    const contentType = response.headers.get("content-type") || "";
+    if (!contentType.includes("application/json")) {
+      return response;
+    }
+
+    try {
+      const data = await response.json();
+      if (data && typeof data === "object" && Array.isArray((data as any).choices)) {
+        (data as any).choices = (data as any).choices.map((choice: any, index: number) => ({
+          index,
+          ...choice,
+        }));
+        return new Response(JSON.stringify(data), {
+          status: response.status,
+          statusText: response.statusText,
+          headers: response.headers,
+        });
+      }
+    } catch {
+      return response;
+    }
+
+    return response;
   };
 }
 
@@ -331,6 +359,42 @@ export async function generateStructuredOutput<T>(options: {
     const cleanedSystem = options.systemPrompt
       .replace(/Use the \S+ tool to [^\n.]+[.\n]?/gi, "")
       .trim();
+
+    try {
+      const toolResult = await generateText({
+        model,
+        system:
+          cleanedSystem +
+          "\n\nReturn the final structured result by calling the submit_structured_output tool.",
+        prompt: options.userPrompt,
+        temperature: options.temperature ?? 0.3,
+        tools: {
+          submit_structured_output: tool({
+            description: "Submit the final structured output",
+            inputSchema: options.schema as any,
+          }),
+        },
+      });
+
+      log("Copilot tool-call response", {
+        modelId: options.modelId,
+        toolCalls: toolResult.toolCalls,
+      });
+
+      if (toolResult.toolCalls.length > 0) {
+        const firstToolCall = toolResult.toolCalls[0] as { input?: unknown };
+        const toolParseResult = options.schema.safeParse(firstToolCall.input);
+        if (toolParseResult.success) {
+          return toolParseResult.data as T;
+        }
+      }
+    } catch (error) {
+      log("Copilot tool-call path failed, falling back to JSON", {
+        modelId: options.modelId,
+        error: String(error),
+      });
+    }
+
     const result = await generateText({
       model,
       system:
