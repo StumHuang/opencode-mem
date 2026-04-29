@@ -17,6 +17,26 @@ import type { MemoryType } from "./types/index.js";
 import { getLanguageName } from "./services/language-detector.js";
 import type { MemoryScope } from "./services/client.js";
 
+/**
+ * Detect prompts injected by other plugins (e.g. opencode-dcp) that should
+ * not be captured as user memories.
+ */
+function isInternalPrompt(text: string): boolean {
+  const trimmed = text.trimStart();
+  // DCP / OMO internal markers
+  if (trimmed.includes("<!-- OMO_INTERNAL_INITIATOR -->")) return true;
+  if (trimmed.includes("<!-- OMO_")) return true;
+  if (trimmed.includes("▣ DCP |")) return true;
+  // Session restore checkpoints injected by opencode
+  if (trimmed.startsWith("[restore checkpointed")) return true;
+  // Prometheus / other large system prompts injected as user turns
+  if (trimmed.startsWith("You are Prometheus")) return true;
+  // Generic: very long prompts that are entirely system-style instructions
+  // (starts with "You are " and is longer than 2000 chars = likely injected)
+  if (trimmed.startsWith("You are ") && trimmed.length > 2000) return true;
+  return false;
+}
+
 export const OpenCodeMemPlugin: Plugin = async (ctx: PluginInput) => {
   const { directory } = ctx;
   initConfig(directory);
@@ -156,6 +176,15 @@ export const OpenCodeMemPlugin: Plugin = async (ctx: PluginInput) => {
         if (textParts.length === 0) return;
         const userMessage = textParts.map((p) => p.text).join("\n");
         if (!userMessage.trim()) return;
+
+        // Skip internal/synthetic prompts injected by other plugins (e.g. DCP)
+        if (isInternalPrompt(userMessage)) {
+          log("chat.message skipped: internal prompt", {
+            sessionID: input.sessionID,
+            preview: userMessage.slice(0, 80),
+          });
+          return;
+        }
 
         log("chat.message captured", {
           sessionID: input.sessionID,
